@@ -79,7 +79,15 @@ ENV MISE_DATA_DIR=/opt/tools/mise \
 # nothing and agents would get the system python instead of the project's.
 # Shims work in any shell, interactive or not. They come first so a project's
 # pinned version beats the system one.
-ENV PATH=/opt/tools/mise/shims:/nix/var/nix/profiles/per-user/opencoded/profile/bin:/nix/var/nix/profiles/default/bin:$PATH
+# Nix 2.x keeps its PROFILE under XDG state, not /nix/var/nix/profiles — the
+# store is content-addressed and lives in /nix, but the profile (the generation
+# that actually puts binaries on PATH) defaults to ~/.local/state/nix. The home
+# directory is NOT persisted here, so that would strand every installed package
+# on recreate: the store data survives, the profile pointing at it does not.
+# Relocating XDG state onto the persisted tools dataset keeps them together.
+ENV XDG_STATE_HOME=/opt/tools/state
+
+ENV PATH=/opt/tools/mise/shims:/opt/tools/state/nix/profiles/profile/bin:$PATH
 
 # nix-command/flakes are needed for `nix profile install nixpkgs#pkg`.
 # sandbox=false because the container lacks the privileges Nix's build sandbox
