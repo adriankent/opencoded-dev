@@ -1,0 +1,114 @@
+name: Build and Push
+
+# Builds the image and pushes it to GHCR. It does not deploy anything.
+#
+# Consumers move when they change their pinned tag in the compose file, never
+# because this ran. There is deliberately no `latest` tag — same rule as
+# caddy-cloudflare and semaphore-op.
+#
+# The scheduled run picks up a rebuilt upstream ghcr.io/brockar/opencoded, which
+# publishes new tags almost daily. A green run here is a new tag available, not
+# a rollout.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "bootstrap-nix.sh"
+      - ".github/workflows/build.yml"
+
+  schedule:
+    # Mondays 06:00 UTC — an hour after caddy-cloudflare so they don't collide.
+    - cron: "0 6 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      base_digest:
+        description: "ghcr.io/brockar/opencoded digest to build on (blank = follow upstream :latest)"
+        required: false
+        type: string
+
+env:
+  IMAGE: ghcr.io/adriankent/opencoded-dev
+  BASE: ghcr.io/brockar/opencoded
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the base image digest
+        id: base
+        env:
+          INPUT_DIGEST: ${{ inputs.base_digest }}
+        run: |
+          set -euo pipefail
+
+          pinned=$(grep -oP '^ARG BASE_DIGEST=\K.*' Dockerfile)
+          echo "pinned in Dockerfile: $pinned"
+
+          if [ -n "${INPUT_DIGEST}" ]; then
+            digest="${INPUT_DIGEST}"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            # Follow upstream :latest on the weekly run. Anonymous pull token is
+            # enough to read a public manifest.
+            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:brockar/opencoded:pull&service=ghcr.io" | jq -r .token)
+            digest=$(curl -fsSLI -H "Authorization: Bearer $tok" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://ghcr.io/v2/brockar/opencoded/manifests/latest" \
+              | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{print $2}')
+            echo "upstream latest: $digest"
+          else
+            digest="$pinned"
+          fi
+
+          if [ -z "$digest" ]; then
+            echo "::error::could not resolve a base digest"; exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          # Tag carries BOTH inputs, the way semaphore-op's does: the build date
+          # and the base it was built on, so a tag is traceable to its upstream.
+          echo "version=$(date -u +%Y.%m.%d)-base$(echo "$digest" | cut -c8-15)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ steps.base.outputs.version }}
+          build-args: |
+            BASE_DIGEST=${{ steps.base.outputs.digest }}
+            VERSION=${{ steps.base.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report the pinnable reference
+        run: |
+          set -euo pipefail
+          ref="${{ env.IMAGE }}:${{ steps.base.outputs.version }}"
+          digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
+          {
+            echo "## Built"
+            echo ""
+            echo '```'
+            echo "image:  $ref"
+            echo "digest: $digest"
+            echo "base:   ${{ steps.base.outputs.digest }}"
+            echo '```'
+            echo ""
+            echo "Pin this in \`stacks/opencode/docker-compose.yaml\` to roll it out."
+          } >> "$GITHUB_STEP_SUMMARY"
