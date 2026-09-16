@@ -71,9 +71,15 @@ jobs:
             echo "::error::could not resolve a base digest"; exit 1
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          # Tag carries BOTH inputs, the way semaphore-op's does: the build date
-          # and the base it was built on, so a tag is traceable to its upstream.
-          echo "version=$(date -u +%Y.%m.%d)-base$(echo "$digest" | cut -c8-15)" >> "$GITHUB_OUTPUT"
+          # Tag carries BOTH inputs, the way semaphore-op's does: the base it was
+          # built on and this repo's commit, so a tag maps to exactly one build.
+          #
+          # The commit SHA is not decoration. Date + base alone collide whenever
+          # two builds happen on the same day from the same base — which is the
+          # normal case when fixing a Dockerfile bug. That silently republishes
+          # an existing tag, making it mutable and defeating the whole point of
+          # pinning exact versions instead of :latest.
+          echo "version=$(date -u +%Y.%m.%d)-base$(echo "$digest" | cut -c8-15)-g$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
